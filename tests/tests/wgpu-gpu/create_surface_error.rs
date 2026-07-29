@@ -71,7 +71,7 @@ static REJECTED_BROWSER_CONFIGURATION_IS_PUBLISHED_AND_RECOVERABLE: GpuTestConfi
                     .expect("getting the browser WebGPU context should not throw")
                     .expect("browser WebGPU context should exist");
                 let surface = instance
-                    .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
+                    .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
                     .expect("could not create browser WebGPU surface");
 
                 let adapter = instance
