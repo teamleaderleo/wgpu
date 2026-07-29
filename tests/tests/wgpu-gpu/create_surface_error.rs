@@ -2,14 +2,13 @@
 //! report the errors we can provoke.
 #![cfg(wasm_test)]
 
-#[cfg(all(target_arch = "wasm32", not(feature = "webgl")))]
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, JsValue};
 use wgpu_test::GpuTestInitializer;
 use wgpu_test::{gpu_test, GpuTestConfiguration};
 
 pub fn all_tests(vec: &mut Vec<GpuTestInitializer>) {
     vec.push(CANVAS_GET_CONTEXT_RETURNED_NULL);
-    #[cfg(not(feature = "webgl"))]
     vec.push(REJECTED_BROWSER_CONFIGURATION_IS_PUBLISHED_AND_RECOVERABLE);
 }
 
@@ -51,7 +50,6 @@ static CANVAS_GET_CONTEXT_RETURNED_NULL: GpuTestConfiguration = GpuTestConfigura
 
 /// Characterize the public state and recovery path after the browser WebGPU
 /// backend rejects a surface configuration without aborting wasm.
-#[cfg(not(feature = "webgl"))]
 #[gpu_test]
 static REJECTED_BROWSER_CONFIGURATION_IS_PUBLISHED_AND_RECOVERABLE: GpuTestConfiguration =
     GpuTestConfiguration::new()
@@ -59,10 +57,7 @@ static REJECTED_BROWSER_CONFIGURATION_IS_PUBLISHED_AND_RECOVERABLE: GpuTestConfi
         .run_async(|_ctx| async move {
             #[cfg(target_arch = "wasm32")]
             {
-                let instance = wgpu_test::initialize_instance(
-                    wgpu::Backends::BROWSER_WEBGPU,
-                    &wgpu_test::TestParameters::default(),
-                );
+                let instance = browser_webgpu_instance();
                 let canvas = wgpu_test::initialize_html_canvas();
                 canvas.set_width(2);
                 canvas.set_height(2);
@@ -81,6 +76,11 @@ static REJECTED_BROWSER_CONFIGURATION_IS_PUBLISHED_AND_RECOVERABLE: GpuTestConfi
                     })
                     .await
                     .expect("could not find a browser WebGPU adapter");
+                assert_eq!(
+                    adapter.get_info().backend,
+                    wgpu::Backend::BrowserWebGpu,
+                    "the characterization must not silently fall back to WebGL"
+                );
                 let (device, queue) = adapter
                     .request_device(&wgpu::DeviceDescriptor::default())
                     .await
@@ -160,28 +160,50 @@ static REJECTED_BROWSER_CONFIGURATION_IS_PUBLISHED_AND_RECOVERABLE: GpuTestConfi
             }
         });
 
-#[cfg(all(target_arch = "wasm32", not(feature = "webgl")))]
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug)]
+struct BrowserWebGpuDisplayHandle;
+
+#[cfg(target_arch = "wasm32")]
+impl raw_window_handle::HasDisplayHandle for BrowserWebGpuDisplayHandle {
+    fn display_handle(
+        &self,
+    ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+        Ok(raw_window_handle::DisplayHandle::web())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn browser_webgpu_instance() -> wgpu::Instance {
+    let mut descriptor =
+        wgpu::InstanceDescriptor::new_with_display_handle(Box::new(BrowserWebGpuDisplayHandle));
+    descriptor.backends = wgpu::Backends::BROWSER_WEBGPU;
+    descriptor.flags = wgpu::InstanceFlags::debugging();
+    wgpu::Instance::new(descriptor)
+}
+
+#[cfg(target_arch = "wasm32")]
 fn call_raw_method(target: &JsValue, name: &str) -> Result<JsValue, JsValue> {
     let method = js_sys::Reflect::get(target, &JsValue::from_str(name))?
         .dyn_into::<js_sys::Function>()?;
     method.call0(target)
 }
 
-#[cfg(all(target_arch = "wasm32", not(feature = "webgl")))]
+#[cfg(target_arch = "wasm32")]
 fn raw_context_is_configured(context: &JsValue) -> bool {
     let configuration = call_raw_method(context, "getConfiguration")
         .expect("GPUCanvasContext.getConfiguration should not throw");
     !configuration.is_null() && !configuration.is_undefined()
 }
 
-#[cfg(all(target_arch = "wasm32", not(feature = "webgl")))]
+#[cfg(target_arch = "wasm32")]
 fn raw_context_acquire_and_destroy(context: &JsValue) {
     let texture = call_raw_method(context, "getCurrentTexture")
         .expect("raw GPUCanvasContext should remain able to acquire after wgpu rejection");
     call_raw_method(&texture, "destroy").expect("destroying the raw canvas texture should succeed");
 }
 
-#[cfg(all(target_arch = "wasm32", not(feature = "webgl")))]
+#[cfg(target_arch = "wasm32")]
 fn present_success(surface: &wgpu::Surface<'_>, queue: &wgpu::Queue, phase: &str) {
     let frame = match surface.get_current_texture() {
         wgpu::CurrentSurfaceTexture::Success(frame)
