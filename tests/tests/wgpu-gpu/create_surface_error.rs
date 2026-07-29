@@ -131,6 +131,12 @@ static REJECTED_BROWSER_CONFIGURATION_IS_PUBLISHED_AND_RECOVERABLE: GpuTestConfi
                 );
                 raw_context_acquire_and_destroy(&raw_context);
 
+                // A supported reconfiguration on the same surface clears the wrapper's
+                // failure flag and recovers without recreating either surface or device.
+                surface.configure(&device, &baseline);
+                assert_eq!(surface.get_configuration(), Some(baseline.clone()));
+                present_success(&surface, &queue, "same-surface supported recovery");
+
                 // Recreating a surface does not make the same unsupported
                 // configuration valid. This mirrors the shared example framework's
                 // current generic `Lost` recovery strategy.
@@ -146,11 +152,11 @@ static REJECTED_BROWSER_CONFIGURATION_IS_PUBLISHED_AND_RECOVERABLE: GpuTestConfi
                     wgpu::CurrentSurfaceTexture::Lost
                 ));
 
-                // A supported fallback clears the backend failure state and proves
+                // A supported fallback on the recreated surface also succeeds, proving
                 // that neither the device nor the browser WebGPU implementation was lost.
                 retry_surface.configure(&device, &baseline);
                 assert_eq!(retry_surface.get_configuration(), Some(baseline));
-                present_success(&retry_surface, &queue, "supported fallback configuration");
+                present_success(&retry_surface, &queue, "recreated-surface supported recovery");
             }
         });
 
