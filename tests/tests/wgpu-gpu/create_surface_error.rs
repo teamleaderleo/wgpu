@@ -7,6 +7,7 @@ use wgpu_test::{gpu_test, GpuTestConfiguration};
 
 pub fn all_tests(vec: &mut Vec<GpuTestInitializer>) {
     vec.push(CANVAS_GET_CONTEXT_RETURNED_NULL);
+    #[cfg(not(feature = "webgl"))]
     vec.push(REJECTED_BROWSER_CONFIGURATION_IS_PUBLISHED_AND_RECOVERABLE);
 }
 
@@ -48,6 +49,7 @@ static CANVAS_GET_CONTEXT_RETURNED_NULL: GpuTestConfiguration = GpuTestConfigura
 
 /// Characterize the public state and recovery path after the browser WebGPU
 /// backend rejects a surface configuration without aborting wasm.
+#[cfg(not(feature = "webgl"))]
 #[gpu_test]
 static REJECTED_BROWSER_CONFIGURATION_IS_PUBLISHED_AND_RECOVERABLE: GpuTestConfiguration =
     GpuTestConfiguration::new()
@@ -60,6 +62,8 @@ static REJECTED_BROWSER_CONFIGURATION_IS_PUBLISHED_AND_RECOVERABLE: GpuTestConfi
                     &wgpu_test::TestParameters::default(),
                 );
                 let canvas = wgpu_test::initialize_html_canvas();
+                canvas.set_width(2);
+                canvas.set_height(2);
                 let surface = instance
                     .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
                     .expect("could not create browser WebGPU surface");
@@ -109,6 +113,8 @@ static REJECTED_BROWSER_CONFIGURATION_IS_PUBLISHED_AND_RECOVERABLE: GpuTestConfi
                 // configuration valid. This mirrors the shared example framework's
                 // current generic `Lost` recovery strategy.
                 let retry_canvas = wgpu_test::initialize_html_canvas();
+                retry_canvas.set_width(2);
+                retry_canvas.set_height(2);
                 let retry_surface = instance
                     .create_surface(wgpu::SurfaceTarget::Canvas(retry_canvas))
                     .expect("could not recreate browser WebGPU surface");
@@ -126,7 +132,7 @@ static REJECTED_BROWSER_CONFIGURATION_IS_PUBLISHED_AND_RECOVERABLE: GpuTestConfi
             }
         });
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "webgl")))]
 fn present_success(surface: &wgpu::Surface<'_>, queue: &wgpu::Queue, phase: &str) {
     let frame = match surface.get_current_texture() {
         wgpu::CurrentSurfaceTexture::Success(frame)
