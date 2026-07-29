@@ -2,6 +2,8 @@
 //! report the errors we can provoke.
 #![cfg(wasm_test)]
 
+#[cfg(all(target_arch = "wasm32", not(feature = "webgl")))]
+use wasm_bindgen::{JsCast, JsValue};
 use wgpu_test::GpuTestInitializer;
 use wgpu_test::{gpu_test, GpuTestConfiguration};
 
@@ -64,8 +66,12 @@ static REJECTED_BROWSER_CONFIGURATION_IS_PUBLISHED_AND_RECOVERABLE: GpuTestConfi
                 let canvas = wgpu_test::initialize_html_canvas();
                 canvas.set_width(2);
                 canvas.set_height(2);
+                let raw_context = canvas
+                    .get_context("webgpu")
+                    .expect("getting the browser WebGPU context should not throw")
+                    .expect("browser WebGPU context should exist");
                 let surface = instance
-                    .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+                    .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
                     .expect("could not create browser WebGPU surface");
 
                 let adapter = instance
@@ -86,6 +92,10 @@ static REJECTED_BROWSER_CONFIGURATION_IS_PUBLISHED_AND_RECOVERABLE: GpuTestConfi
                 surface.configure(&device, &baseline);
                 present_success(&surface, &queue, "baseline configuration");
                 assert_eq!(surface.get_configuration(), Some(baseline.clone()));
+                assert!(
+                    raw_context_is_configured(&raw_context),
+                    "the raw browser context should expose the accepted baseline configuration"
+                );
 
                 let mut rejected = baseline.clone();
                 rejected.color_space = wgpu::SurfaceColorSpace::ExtendedSrgbLinear;
@@ -99,6 +109,9 @@ static REJECTED_BROWSER_CONFIGURATION_IS_PUBLISHED_AND_RECOVERABLE: GpuTestConfi
 
                 // Browser WebGPU deliberately contains this rejection instead of
                 // allowing a JavaScript exception to become an unrecoverable wasm abort.
+                // This particular color-space rejection happens before the backend calls
+                // `GPUCanvasContext.configure`, so the raw canvas remains configured with
+                // the earlier accepted baseline.
                 surface.configure(&device, &rejected);
 
                 // Current behavior: the public wrapper publishes the request even
@@ -108,6 +121,15 @@ static REJECTED_BROWSER_CONFIGURATION_IS_PUBLISHED_AND_RECOVERABLE: GpuTestConfi
                     surface.get_current_texture(),
                     wgpu::CurrentSurfaceTexture::Lost
                 ));
+
+                // The underlying browser context is neither unconfigured nor lost: it
+                // still exposes a configuration and can acquire a canvas texture. The
+                // `Lost` result is therefore wrapper-owned failure state in this path.
+                assert!(
+                    raw_context_is_configured(&raw_context),
+                    "rejected wgpu-only color-space mapping should not erase the browser baseline"
+                );
+                raw_context_acquire_and_destroy(&raw_context);
 
                 // Recreating a surface does not make the same unsupported
                 // configuration valid. This mirrors the shared example framework's
@@ -131,6 +153,27 @@ static REJECTED_BROWSER_CONFIGURATION_IS_PUBLISHED_AND_RECOVERABLE: GpuTestConfi
                 present_success(&retry_surface, &queue, "supported fallback configuration");
             }
         });
+
+#[cfg(all(target_arch = "wasm32", not(feature = "webgl")))]
+fn call_raw_method(target: &JsValue, name: &str) -> Result<JsValue, JsValue> {
+    let method = js_sys::Reflect::get(target, &JsValue::from_str(name))?
+        .dyn_into::<js_sys::Function>()?;
+    method.call0(target)
+}
+
+#[cfg(all(target_arch = "wasm32", not(feature = "webgl")))]
+fn raw_context_is_configured(context: &JsValue) -> bool {
+    let configuration = call_raw_method(context, "getConfiguration")
+        .expect("GPUCanvasContext.getConfiguration should not throw");
+    !configuration.is_null() && !configuration.is_undefined()
+}
+
+#[cfg(all(target_arch = "wasm32", not(feature = "webgl")))]
+fn raw_context_acquire_and_destroy(context: &JsValue) {
+    let texture = call_raw_method(context, "getCurrentTexture")
+        .expect("raw GPUCanvasContext should remain able to acquire after wgpu rejection");
+    call_raw_method(&texture, "destroy").expect("destroying the raw canvas texture should succeed");
+}
 
 #[cfg(all(target_arch = "wasm32", not(feature = "webgl")))]
 fn present_success(surface: &wgpu::Surface<'_>, queue: &wgpu::Queue, phase: &str) {
