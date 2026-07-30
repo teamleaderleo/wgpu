@@ -97,3 +97,197 @@ fn thread_panicking() -> bool {
         }
     }
 }
+
+#[cfg(all(test, custom, std))]
+mod tests {
+    use super::*;
+    use std::{
+        panic::{catch_unwind, AssertUnwindSafe},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
+
+    #[derive(Debug)]
+    struct TestTexture;
+
+    impl custom::TextureInterface for TestTexture {
+        fn create_view(
+            &self,
+            _desc: &TextureViewDescriptor<'_>,
+        ) -> custom::DispatchTextureView {
+            unimplemented!("the ownership characterization never creates a texture view")
+        }
+
+        fn destroy(&self) {}
+    }
+
+    #[derive(Debug)]
+    struct RecordingOutputDetail {
+        discard_calls: Arc<AtomicUsize>,
+        release_calls: Arc<AtomicUsize>,
+    }
+
+    impl custom::SurfaceOutputDetailInterface for RecordingOutputDetail {
+        fn texture_discard(&self) {
+            self.discard_calls.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn texture_release(&self) {
+            self.release_calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[derive(Debug)]
+    struct PanickingPresentQueue {
+        present_calls: Arc<AtomicUsize>,
+    }
+
+    impl custom::QueueInterface for PanickingPresentQueue {
+        fn write_buffer(
+            &self,
+            _buffer: &custom::DispatchBuffer,
+            _offset: BufferAddress,
+            _data: &[u8],
+        ) {
+            unimplemented!()
+        }
+
+        fn create_staging_buffer(
+            &self,
+            _size: BufferSize,
+        ) -> Option<custom::DispatchQueueWriteBuffer> {
+            unimplemented!()
+        }
+
+        fn validate_write_buffer(
+            &self,
+            _buffer: &custom::DispatchBuffer,
+            _offset: BufferAddress,
+            _size: BufferSize,
+        ) -> Option<()> {
+            unimplemented!()
+        }
+
+        fn write_staging_buffer(
+            &self,
+            _buffer: &custom::DispatchBuffer,
+            _offset: BufferAddress,
+            _staging_buffer: &custom::DispatchQueueWriteBuffer,
+        ) {
+            unimplemented!()
+        }
+
+        fn write_texture(
+            &self,
+            _texture: TexelCopyTextureInfo<'_>,
+            _data: &[u8],
+            _data_layout: TexelCopyBufferLayout,
+            _size: Extent3d,
+        ) {
+            unimplemented!()
+        }
+
+        #[cfg(all(target_arch = "wasm32", feature = "web"))]
+        fn copy_external_image_to_texture(
+            &self,
+            _source: &CopyExternalImageSourceInfo,
+            _dest: CopyExternalImageDestInfo<&Texture>,
+            _size: Extent3d,
+        ) {
+            unimplemented!()
+        }
+
+        fn submit(
+            &self,
+            _command_buffers: &mut dyn Iterator<Item = custom::DispatchCommandBuffer>,
+        ) -> u64 {
+            unimplemented!()
+        }
+
+        fn get_timestamp_period(&self) -> f32 {
+            unimplemented!()
+        }
+
+        fn on_submitted_work_done(&self, _callback: custom::BoxSubmittedWorkDoneCallback) {
+            unimplemented!()
+        }
+
+        fn compact_blas(
+            &self,
+            _blas: &custom::DispatchBlas,
+        ) -> (Option<u64>, custom::DispatchBlas) {
+            unimplemented!()
+        }
+
+        fn present(&self, _detail: &custom::DispatchSurfaceOutputDetail) {
+            self.present_calls.fetch_add(1, Ordering::SeqCst);
+            panic!("injected present failure after public ownership commit");
+        }
+    }
+
+    fn test_surface_texture(
+        discard_calls: Arc<AtomicUsize>,
+        release_calls: Arc<AtomicUsize>,
+    ) -> SurfaceTexture {
+        let descriptor = TextureDescriptor {
+            label: Some("surface presentation ownership characterization"),
+            size: Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        };
+
+        SurfaceTexture {
+            texture: Texture::from_custom(TestTexture, &descriptor),
+            presented: false,
+            detail: custom::DispatchSurfaceOutputDetail::custom(RecordingOutputDetail {
+                discard_calls,
+                release_calls,
+            }),
+        }
+    }
+
+    #[test]
+    fn ordinary_unpresented_drop_discards() {
+        let discard_calls = Arc::new(AtomicUsize::new(0));
+        let release_calls = Arc::new(AtomicUsize::new(0));
+
+        drop(test_surface_texture(
+            Arc::clone(&discard_calls),
+            Arc::clone(&release_calls),
+        ));
+
+        assert_eq!(discard_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(release_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn present_panic_does_not_discard_or_release_after_ownership_commit() {
+        let discard_calls = Arc::new(AtomicUsize::new(0));
+        let release_calls = Arc::new(AtomicUsize::new(0));
+        let present_calls = Arc::new(AtomicUsize::new(0));
+        let queue = Queue::from_custom(PanickingPresentQueue {
+            present_calls: Arc::clone(&present_calls),
+        });
+        let surface_texture = test_surface_texture(
+            Arc::clone(&discard_calls),
+            Arc::clone(&release_calls),
+        );
+
+        let result = catch_unwind(AssertUnwindSafe(|| queue.present(surface_texture)));
+
+        assert!(result.is_err());
+        assert_eq!(present_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(discard_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(release_calls.load(Ordering::SeqCst), 0);
+    }
+}
