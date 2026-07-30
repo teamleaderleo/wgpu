@@ -85,3 +85,45 @@ jobs:
             --package wgpu-test \
             --test wgpu-gpu \
             --features webgl,exhaust
+
+  browser-runtime:
+    name: Browser surface runtime characterization
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      RUST_LOG: debug,wasm_bindgen_wasm_interpreter=warn,wasm_bindgen_cli_support=warn,walrus=warn,naga=info
+      WASM_BINDGEN_TEST_TIMEOUT: "300"
+      WGPU_CI: "true"
+    steps:
+      - name: Checkout characterization branch
+        uses: actions/checkout@v6
+
+      - name: Install Rust and wasm target
+        run: |
+          rustup toolchain install 1.93 --no-self-update --profile=minimal --target wasm32-unknown-unknown
+          rustup override set 1.93
+          cargo -V
+
+      - name: Resolve and install wasm-bindgen CLI
+        run: |
+          WASM_BINDGEN_VERSION=$(cargo metadata --format-version 1 --all-features | jq -r '.packages[] | select(.name == "wasm-bindgen") | .version' | head -n1)
+          test -n "$WASM_BINDGEN_VERSION"
+          echo "WASM_BINDGEN_VERSION=$WASM_BINDGEN_VERSION" >> "$GITHUB_ENV"
+          cargo +stable install wasm-bindgen-cli --version="$WASM_BINDGEN_VERSION" --locked
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: List focused browser tests
+        run: |
+          cargo xtask test-wasm --list -- --test wgpu-gpu create_surface_error | tee /tmp/fieldwork-browser-tests.txt
+          grep -i "canvas_get_context_returned_null" /tmp/fieldwork-browser-tests.txt
+          grep -i "unconfigured_browser_surface_reports_lost" /tmp/fieldwork-browser-tests.txt
+          grep -i "zero_sized_browser_configuration_is_applied_with_validation" /tmp/fieldwork-browser-tests.txt
+          grep -i "rejected_browser_configuration_is_published_and_recoverable" /tmp/fieldwork-browser-tests.txt
+
+      - name: Execute focused browser surface module
+        run: |
+          cargo xtask test-wasm --test-threads 1 -- --test wgpu-gpu create_surface_error
