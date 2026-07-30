@@ -9,6 +9,7 @@ use wgpu_test::{gpu_test, GpuTestConfiguration};
 
 pub fn all_tests(vec: &mut Vec<GpuTestInitializer>) {
     vec.push(CANVAS_GET_CONTEXT_RETURNED_NULL);
+    vec.push(UNCONFIGURED_BROWSER_SURFACE_REPORTS_LOST);
     vec.push(REJECTED_BROWSER_CONFIGURATION_IS_PUBLISHED_AND_RECOVERABLE);
 }
 
@@ -48,6 +49,42 @@ static CANVAS_GET_CONTEXT_RETURNED_NULL: GpuTestConfiguration = GpuTestConfigura
         }
     });
 
+/// Characterize the browser-WebGPU result for acquisition before any successful
+/// configuration. Raw WebGPU reports an invalid-state exception in this state,
+/// while the current wgpu browser backend contains that exception as `Lost`.
+#[gpu_test]
+static UNCONFIGURED_BROWSER_SURFACE_REPORTS_LOST: GpuTestConfiguration =
+    GpuTestConfiguration::new()
+        .parameters(wgpu_test::TestParameters::default().enable_noop())
+        .run_async(|_ctx| async move {
+            #[cfg(target_arch = "wasm32")]
+            {
+                let instance = browser_webgpu_instance();
+                let canvas = wgpu_test::initialize_html_canvas();
+                let raw_context = canvas
+                    .get_context("webgpu")
+                    .expect("getting the browser WebGPU context should not throw")
+                    .expect("browser WebGPU context should exist");
+                let surface = instance
+                    .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+                    .expect("could not create browser WebGPU surface");
+
+                assert_eq!(surface.get_configuration(), None);
+                assert!(
+                    !raw_context_is_configured(&raw_context),
+                    "raw browser context should begin unconfigured"
+                );
+                assert!(matches!(
+                    surface.get_current_texture(),
+                    wgpu::CurrentSurfaceTexture::Lost
+                ));
+                assert!(
+                    !raw_context_is_configured(&raw_context),
+                    "failed acquisition should not configure the raw browser context"
+                );
+            }
+        });
+
 /// Characterize the public state and recovery path after the browser WebGPU
 /// backend rejects a surface configuration without aborting wasm.
 #[gpu_test]
@@ -61,6 +98,7 @@ static REJECTED_BROWSER_CONFIGURATION_IS_PUBLISHED_AND_RECOVERABLE: GpuTestConfi
                 let canvas = wgpu_test::initialize_html_canvas();
                 canvas.set_width(2);
                 canvas.set_height(2);
+                let observed_canvas = canvas.clone();
                 let raw_context = canvas
                     .get_context("webgpu")
                     .expect("getting the browser WebGPU context should not throw")
@@ -96,8 +134,11 @@ static REJECTED_BROWSER_CONFIGURATION_IS_PUBLISHED_AND_RECOVERABLE: GpuTestConfi
                     raw_context_is_configured(&raw_context),
                     "the raw browser context should expose the accepted baseline configuration"
                 );
+                assert_eq!((observed_canvas.width(), observed_canvas.height()), (2, 2));
 
                 let mut rejected = baseline.clone();
+                rejected.width = 7;
+                rejected.height = 5;
                 rejected.color_space = wgpu::SurfaceColorSpace::ExtendedSrgbLinear;
                 assert!(
                     !surface
@@ -109,32 +150,42 @@ static REJECTED_BROWSER_CONFIGURATION_IS_PUBLISHED_AND_RECOVERABLE: GpuTestConfi
 
                 // Browser WebGPU deliberately contains this rejection instead of
                 // allowing a JavaScript exception to become an unrecoverable wasm abort.
-                // This particular color-space rejection happens before the backend calls
-                // `GPUCanvasContext.configure`, so the raw canvas remains configured with
-                // the earlier accepted baseline.
+                // The backend updates the canvas extent first, then rejects this color
+                // space before calling `GPUCanvasContext.configure`. Raw configuration
+                // therefore remains the earlier accepted baseline while the canvas and
+                // public wgpu cache already expose fields from the rejected request.
                 surface.configure(&device, &rejected);
 
-                // Current behavior: the public wrapper publishes the request even
-                // though the browser backend did not apply it.
                 assert_eq!(surface.get_configuration(), Some(rejected.clone()));
+                assert_eq!(
+                    (observed_canvas.width(), observed_canvas.height()),
+                    (rejected.width, rejected.height),
+                    "canvas extent is mutated before browser configuration rejection"
+                );
                 assert!(matches!(
                     surface.get_current_texture(),
                     wgpu::CurrentSurfaceTexture::Lost
                 ));
 
                 // The underlying browser context is neither unconfigured nor lost: it
-                // still exposes a configuration and can acquire a canvas texture. The
-                // `Lost` result is therefore wrapper-owned failure state in this path.
+                // still exposes its accepted configuration and can acquire a texture.
+                // The acquired raw texture follows the resized canvas extent, showing a
+                // mixed state rather than simple preservation of the complete baseline.
                 assert!(
                     raw_context_is_configured(&raw_context),
                     "rejected wgpu-only color-space mapping should not erase the browser baseline"
                 );
-                raw_context_acquire_and_destroy(&raw_context);
+                raw_context_acquire_assert_size_and_destroy(
+                    &raw_context,
+                    rejected.width,
+                    rejected.height,
+                );
 
                 // A supported reconfiguration on the same surface clears the wrapper's
                 // failure flag and recovers without recreating either surface or device.
                 surface.configure(&device, &baseline);
                 assert_eq!(surface.get_configuration(), Some(baseline.clone()));
+                assert_eq!((observed_canvas.width(), observed_canvas.height()), (2, 2));
                 present_success(&surface, &queue, "same-surface supported recovery");
 
                 // Recreating a surface does not make the same unsupported
@@ -197,9 +248,23 @@ fn raw_context_is_configured(context: &JsValue) -> bool {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn raw_context_acquire_and_destroy(context: &JsValue) {
+fn raw_u32_property(target: &JsValue, name: &str) -> u32 {
+    js_sys::Reflect::get(target, &JsValue::from_str(name))
+        .unwrap_or_else(|error| panic!("reading raw {name} property failed: {error:?}"))
+        .as_f64()
+        .unwrap_or_else(|| panic!("raw {name} property was not numeric")) as u32
+}
+
+#[cfg(target_arch = "wasm32")]
+fn raw_context_acquire_assert_size_and_destroy(
+    context: &JsValue,
+    expected_width: u32,
+    expected_height: u32,
+) {
     let texture = call_raw_method(context, "getCurrentTexture")
         .expect("raw GPUCanvasContext should remain able to acquire after wgpu rejection");
+    assert_eq!(raw_u32_property(&texture, "width"), expected_width);
+    assert_eq!(raw_u32_property(&texture, "height"), expected_height);
     call_raw_method(&texture, "destroy").expect("destroying the raw canvas texture should succeed");
 }
 
