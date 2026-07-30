@@ -6,7 +6,7 @@ on:
       - fieldwork/pre-hal-present-failure-noop
   pull_request:
     branches:
-      - trunk
+      - fieldwork/surface-config-rejection-state
   workflow_dispatch:
 
 permissions:
