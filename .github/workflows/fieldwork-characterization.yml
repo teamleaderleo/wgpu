@@ -1,0 +1,70 @@
+name: Fieldwork surface characterization
+
+on:
+  push:
+    branches:
+      - fieldwork/surface-config-rejection-state
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fieldwork-surface-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "false"
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: full
+
+jobs:
+  public-wrapper:
+    name: Public wrapper characterization
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout characterization branch
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.93 --no-self-update --profile=minimal --component rustfmt
+          rustup override set 1.93
+          cargo -V
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run custom-backend presentation tests
+        run: |
+          cargo test --locked \
+            -p wgpu \
+            --no-default-features \
+            --features std,custom \
+            surface_texture::tests \
+            -- --nocapture
+
+  browser-compile:
+    name: Browser characterization compile
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RUSTFLAGS: --cfg wasm_test -D warnings
+    steps:
+      - name: Checkout characterization branch
+        uses: actions/checkout@v6
+
+      - name: Install Rust and wasm target
+        run: |
+          rustup toolchain install 1.93 --no-self-update --profile=minimal --component clippy --target wasm32-unknown-unknown
+          rustup override set 1.93
+          cargo -V
+
+      - name: Compile and lint wasm characterization binary
+        run: |
+          cargo clippy --locked \
+            --target wasm32-unknown-unknown \
+            --package wgpu-test \
+            --test wgpu-gpu \
+            --features webgl,exhaust
