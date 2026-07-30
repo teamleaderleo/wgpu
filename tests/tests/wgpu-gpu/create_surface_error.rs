@@ -10,6 +10,7 @@ use wgpu_test::{gpu_test, GpuTestConfiguration};
 pub fn all_tests(vec: &mut Vec<GpuTestInitializer>) {
     vec.push(CANVAS_GET_CONTEXT_RETURNED_NULL);
     vec.push(UNCONFIGURED_BROWSER_SURFACE_REPORTS_LOST);
+    vec.push(ZERO_SIZED_BROWSER_CONFIGURATION_IS_APPLIED_WITH_VALIDATION);
     vec.push(REJECTED_BROWSER_CONFIGURATION_IS_PUBLISHED_AND_RECOVERABLE);
 }
 
@@ -69,7 +70,7 @@ static UNCONFIGURED_BROWSER_SURFACE_REPORTS_LOST: GpuTestConfiguration =
                     .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
                     .expect("could not create browser WebGPU surface");
 
-                assert_eq!(surface.get_configuration(), None);
+                assert!(surface.get_configuration().is_none());
                 assert!(
                     !raw_context_is_configured(&raw_context),
                     "raw browser context should begin unconfigured"
@@ -82,6 +83,93 @@ static UNCONFIGURED_BROWSER_SURFACE_REPORTS_LOST: GpuTestConfiguration =
                     !raw_context_is_configured(&raw_context),
                     "failed acquisition should not configure the raw browser context"
                 );
+            }
+        });
+
+/// Characterize WebGPU's zero-sized canvas rule. Raw WebGPU reports validation
+/// while retaining a configuration that becomes usable after the canvas is made
+/// nonzero. The current public wgpu docs instead describe zero dimensions as a
+/// `Surface::configure` panic.
+#[gpu_test]
+static ZERO_SIZED_BROWSER_CONFIGURATION_IS_APPLIED_WITH_VALIDATION: GpuTestConfiguration =
+    GpuTestConfiguration::new()
+        .parameters(wgpu_test::TestParameters::default().enable_noop())
+        .run_async(|_ctx| async move {
+            #[cfg(target_arch = "wasm32")]
+            {
+                let instance = browser_webgpu_instance();
+                let canvas = wgpu_test::initialize_html_canvas();
+                canvas.set_width(1);
+                canvas.set_height(1);
+                let observed_canvas = canvas.clone();
+                let raw_context = canvas
+                    .get_context("webgpu")
+                    .expect("getting the browser WebGPU context should not throw")
+                    .expect("browser WebGPU context should exist");
+                let surface = instance
+                    .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+                    .expect("could not create browser WebGPU surface");
+
+                let adapter = instance
+                    .request_adapter(&wgpu::RequestAdapterOptions {
+                        compatible_surface: Some(&surface),
+                        ..Default::default()
+                    })
+                    .await
+                    .expect("could not find a browser WebGPU adapter");
+                assert_eq!(adapter.get_info().backend, wgpu::Backend::BrowserWebGpu);
+                let (device, queue) = adapter
+                    .request_device(&wgpu::DeviceDescriptor::default())
+                    .await
+                    .expect("could not create browser WebGPU device");
+
+                let baseline = surface
+                    .get_default_config(&adapter, 1, 1)
+                    .expect("surface should have a supported default configuration");
+                let mut zero_width = baseline.clone();
+                zero_width.width = 0;
+
+                let configure_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+                surface.configure(&device, &zero_width);
+                let configure_error = configure_scope.pop().await;
+
+                assert!(
+                    configure_error.is_some(),
+                    "zero-sized raw canvas configuration should emit validation"
+                );
+                assert_eq!(surface.get_configuration(), Some(zero_width.clone()));
+                assert_eq!((observed_canvas.width(), observed_canvas.height()), (0, 1));
+                assert!(
+                    raw_context_is_configured(&raw_context),
+                    "zero canvas size should not erase the accepted raw configuration dictionary"
+                );
+
+                let acquisition_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+                let frame = match surface.get_current_texture() {
+                    wgpu::CurrentSurfaceTexture::Success(frame)
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+                    other => panic!(
+                        "zero-sized browser canvas should return an error texture, got {other:?}"
+                    ),
+                };
+                let acquisition_error = acquisition_scope.pop().await;
+
+                assert!(
+                    acquisition_error.is_some(),
+                    "acquiring the zero-sized canvas texture should emit validation"
+                );
+                assert_eq!(frame.texture.width(), 0);
+                assert_eq!(frame.texture.height(), 1);
+                drop(frame);
+
+                // No second raw configure is required by the WebGPU canvas contract
+                // after fixing the canvas size, but public wgpu state still contains a
+                // zero-sized SurfaceConfiguration. Reconfigure with the supported
+                // baseline so the public cache and raw canvas return to aligned state.
+                observed_canvas.set_width(1);
+                surface.configure(&device, &baseline);
+                assert_eq!(surface.get_configuration(), Some(baseline));
+                present_success(&surface, &queue, "zero-size recovery");
             }
         });
 
