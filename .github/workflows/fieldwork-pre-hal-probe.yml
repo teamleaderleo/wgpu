@@ -33,7 +33,18 @@ jobs:
           cargo -V
 
       - name: Apply deterministic experiment patch
-        run: python3 fieldwork/patch_pre_hal_probe.py
+        run: |
+          python3 fieldwork/patch_pre_hal_probe.py
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("wgpu-core/src/present.rs")
+          text = path.read_text()
+          old = "assert_eq!(surface.configure(&device, &config), None);"
+          new = "assert!(surface.configure(&device, &config).is_none());"
+          if text.count(old) != 1:
+              raise SystemExit("generated configure assertion was not found exactly once")
+          path.write_text(text.replace(old, new, 1))
+          PY
 
       - name: Check patched formatting
         run: cargo fmt --all -- --check
