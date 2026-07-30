@@ -43,5 +43,5 @@ jobs:
           cargo test --locked \
             -p wgpu-core \
             --features noop \
-            fieldwork_pre_hal_failure_detaches_without_discard \
+            present::fieldwork_pre_hal_tests::fieldwork_pre_hal_failure_detaches_without_discard \
             -- --exact --nocapture
