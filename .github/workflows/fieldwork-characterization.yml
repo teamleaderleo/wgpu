@@ -36,8 +36,22 @@ jobs:
           rustup override set 1.93
           cargo -V
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+      - name: Normalize and verify formatting
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+          git diff --check
+          git diff --stat
+
+      - name: Require both characterization identities
+        run: |
+          cargo test --locked \
+            -p wgpu \
+            --no-default-features \
+            --features std,custom \
+            -- --list | tee /tmp/fieldwork-wrapper-tests.txt
+          grep -F "surface_texture::tests::ordinary_unpresented_drop_discards" /tmp/fieldwork-wrapper-tests.txt
+          grep -F "surface_texture::tests::present_panic_does_not_discard_or_release_after_ownership_commit" /tmp/fieldwork-wrapper-tests.txt
 
       - name: Run custom-backend presentation tests
         run: |
