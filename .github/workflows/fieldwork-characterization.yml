@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - fieldwork/surface-config-rejection-state
+  pull_request:
+    branches:
+      - trunk
   workflow_dispatch:
 
 permissions:
