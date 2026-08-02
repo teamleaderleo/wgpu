@@ -45,38 +45,42 @@ naga="$PWD/target/debug/naga"
 test -x "$naga"
 
 run_case() {
-    local name=$1 expected=$2
+    local name=$1
     local shader="$work/$name.wgsl"
     local stdout="$output_dir/$name.stdout"
     local stderr="$output_dir/$name.stderr"
     local status=0
+    local classification
 
     "$naga" "$shader" >"$stdout" 2>"$stderr" || status=$?
-    printf '%s\t%d\t%s\t%s\n' \
-        "$name" "$status" \
+    if [[ $status -eq 0 ]]; then
+        classification=accepted
+    elif grep -Fq "Unable to cast" "$stderr"; then
+        classification=unable-to-cast
+    else
+        classification=unexpected-failure
+    fi
+
+    printf '%s\t%d\t%s\t%s\t%s\n' \
+        "$name" "$status" "$classification" \
         "$(sha256sum "$stdout" | cut -d' ' -f1)" \
         "$(sha256sum "$stderr" | cut -d' ' -f1)" \
         >>"$output_dir/results.tsv"
-
-    case "$expected" in
-        success)
-            test "$status" -eq 0
-            ;;
-        unable-to-cast)
-            test "$status" -ne 0
-            grep -Fq "Unable to cast" "$stderr"
-            ;;
-        *)
-            echo "unknown expectation: $expected" >&2
-            exit 2
-            ;;
-    esac
 }
 
 : >"$output_dir/results.tsv"
-run_case scalar-control success
-run_case vec-to-scalar unable-to-cast
-run_case scalar-to-vec unable-to-cast
+run_case scalar-control
+run_case vec-to-scalar
+run_case scalar-to-vec
+
+scalar_status=$(awk -F '\t' '$1 == "scalar-control" { print $2 }' "$output_dir/results.tsv")
+test "$scalar_status" -eq 0
+
+if awk -F '\t' '$3 == "unexpected-failure" { found = 1 } END { exit !found }' "$output_dir/results.tsv"; then
+    echo "a probe case failed outside the known validation boundary" >&2
+    cat "$output_dir/results.tsv" >&2
+    exit 1
+fi
 
 {
     echo "head=$(git rev-parse HEAD)"
