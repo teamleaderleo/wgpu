@@ -1,0 +1,83 @@
+name: Fieldwork device-loss surface teardown
+
+on:
+  push:
+    branches:
+      - fieldwork/device-loss-surface-teardown
+  pull_request:
+    branches:
+      - fieldwork/surface-config-rejection-state
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "false"
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: full
+
+jobs:
+  teardown-order:
+    name: Device-loss teardown ordering
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout experiment branch
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.93 --no-self-update --profile=minimal --component rustfmt
+          rustup override set 1.93
+          cargo -V
+
+      - name: Apply deterministic teardown patch
+        run: |
+          python3 fieldwork/patch_device_loss_teardown.py
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("wgpu-hal/src/noop/mod.rs")
+          text = path.read_text()
+          old = """impl core::borrow::Borrow<Resource> for SurfaceResource {
+              fn borrow(&self) -> &Resource {
+                  &self.texture
+              }
+          }
+          """
+          new = old + """
+          impl core::borrow::Borrow<dyn crate::DynTexture> for SurfaceResource {
+              fn borrow(&self) -> &dyn crate::DynTexture {
+                  &self.texture
+              }
+          }
+          """
+          if text.count(old) != 1:
+              raise SystemExit("generated static surface borrow was not found exactly once")
+          path.write_text(text.replace(old, new, 1))
+          PY
+
+      - name: Normalize and verify generated source
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+          git diff --check
+          git diff --stat
+
+      - name: Require both teardown test identities
+        run: |
+          cargo test --locked \
+            -p wgpu-core \
+            --features noop \
+            -- --list | tee /tmp/fieldwork-teardown-tests.txt
+          grep -F "fieldwork_device_loss_teardown_tests::fieldwork_surface_drop_unconfigures_before_retained_release" /tmp/fieldwork-teardown-tests.txt
+          grep -F "fieldwork_device_loss_teardown_tests::fieldwork_release_before_unconfigure_satisfies_noop_precondition" /tmp/fieldwork-teardown-tests.txt
+
+      - name: Execute teardown baseline and release control
+        run: |
+          cargo test --locked \
+            -p wgpu-core \
+            --features noop \
+            fieldwork_device_loss_teardown_tests \
+            -- --nocapture
