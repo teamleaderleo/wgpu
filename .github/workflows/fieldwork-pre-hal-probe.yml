@@ -1,0 +1,58 @@
+name: Fieldwork pre-HAL presentation probe
+
+on:
+  push:
+    branches:
+      - fieldwork/pre-hal-present-failure-noop
+  pull_request:
+    branches:
+      - fieldwork/surface-config-rejection-state
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "false"
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: full
+
+jobs:
+  core-pre-hal-probe:
+    name: Core pre-HAL failure probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout experiment branch
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.93 --no-self-update --profile=minimal --component rustfmt
+          rustup override set 1.93
+          cargo -V
+
+      - name: Apply deterministic experiment patch
+        run: |
+          python3 fieldwork/patch_pre_hal_probe.py
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("wgpu-core/src/present.rs")
+          text = path.read_text()
+          old = "assert_eq!(surface.configure(&device, &config), None);"
+          new = "assert!(surface.configure(&device, &config).is_none());"
+          if text.count(old) != 1:
+              raise SystemExit("generated configure assertion was not found exactly once")
+          path.write_text(text.replace(old, new, 1))
+          PY
+
+      - name: Check patched formatting
+        run: cargo fmt --all -- --check
+
+      - name: Execute controlled core ownership experiment
+        run: |
+          cargo test --locked \
+            -p wgpu-core \
+            --features noop \
+            present::fieldwork_pre_hal_tests::fieldwork_pre_hal_failure_detaches_without_discard \
+            -- --exact --nocapture
