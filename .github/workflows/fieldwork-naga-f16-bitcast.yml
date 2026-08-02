@@ -1,0 +1,46 @@
+name: Fieldwork Naga f16 bitcast probe
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/fieldwork-naga-f16-bitcast.yml"
+      - "contrib/fieldwork/naga_f16_bitcast_probe.sh"
+      - "naga/**"
+      - "naga-cli/**"
+      - "Cargo.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install repository Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo state
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Validate probe shell
+        run: bash -n contrib/fieldwork/naga_f16_bitcast_probe.sh
+
+      - name: Run scalar control and both f16 shape-changing bitcasts
+        run: |
+          bash contrib/fieldwork/naga_f16_bitcast_probe.sh \
+            "fieldwork-artifacts/naga-f16-bitcast-${{ github.run_id }}-${{ github.run_attempt }}"
+
+      - name: Upload exact probe receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: naga-f16-bitcast-${{ github.run_id }}-${{ github.run_attempt }}
+          path: fieldwork-artifacts/
+          if-no-files-found: error
+          retention-days: 30
