@@ -1,0 +1,54 @@
+diff --git a/wgpu-core/src/device/queue.rs b/wgpu-core/src/device/queue.rs
+index 1e74b3198..000000000 100644
+--- a/wgpu-core/src/device/queue.rs
++++ b/wgpu-core/src/device/queue.rs
+@@ -1872,9 +1872,6 @@ impl Queue {
+         let mut size_info = blas.size_info;
+         size_info.acceleration_structure_size = size;
+ 
+-        let mut pending_writes = self.pending_writes.lock();
+-        let cmd_buf_raw = pending_writes.activate();
+-
+         let raw = unsafe {
+             device
+                 .raw()
+@@ -1891,14 +1888,6 @@ impl Queue {
+ 
+         let src_raw = blas.try_raw(&snatch_guard)?;
+ 
+-        unsafe {
+-            cmd_buf_raw.copy_acceleration_structure_to_acceleration_structure(
+-                src_raw,
+-                raw.as_ref(),
+-                wgt::AccelerationStructureCopy::Compact,
+-            )
+-        };
+-
+         let handle = unsafe {
+             device
+                 .raw()
+@@ -1906,14 +1895,25 @@ impl Queue {
+         };
+ 
+-        drop(snatch_guard);
+-
+         let mut command_indices_lock = device.command_indices.write();
+         command_indices_lock.next_acceleration_structure_build_command_index += 1;
+         let built_index =
+             NonZeroU64::new(command_indices_lock.next_acceleration_structure_build_command_index)
+                 .unwrap();
+ 
++        let mut pending_writes = self.pending_writes.lock();
++        let cmd_buf_raw = pending_writes.activate();
++
++        unsafe {
++            cmd_buf_raw.copy_acceleration_structure_to_acceleration_structure(
++                src_raw,
++                raw.as_ref(),
++                wgt::AccelerationStructureCopy::Compact,
++            )
++        };
++
+         let new_blas = Arc::new(Blas {
+             state: ResourceState::Valid(BlasState {
+                 raw: Snatchable::new(raw),
