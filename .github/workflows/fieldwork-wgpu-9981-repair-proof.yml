@@ -1,0 +1,112 @@
+name: Fieldwork WGPU 9981 repair proof
+
+on:
+  pull_request:
+    branches:
+      - fieldwork/wgpu-9981-current-base
+    paths:
+      - .github/workflows/fieldwork-wgpu-9981-repair-proof.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ranked-lock-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out execution carrier
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify current-public source and carrier fence
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git merge-base HEAD fieldwork/wgpu-9981-current-base)" = "41bac0dffbeb322a77a8f96c272c5f557e82eb7e"
+          git diff --name-only 41bac0dffbeb322a77a8f96c272c5f557e82eb7e..HEAD | sort > actual
+          printf '%s\n' .github/workflows/fieldwork-wgpu-9981-repair-proof.yml | sort > expected
+          diff -u expected actual
+          rm actual expected
+          test "$(git hash-object wgpu-core/src/device/queue.rs)" = "e29290898c9b294723410e1e89fd03a6dbf1a42c"
+
+      - name: Materialize hierarchy-consistent repair in workspace only
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('wgpu-core/src/device/queue.rs')
+          text = path.read_text()
+
+          old_pending = '''        let mut pending_writes = self.pending_writes.lock();
+          let cmd_buf_raw = pending_writes.activate();
+          '''
+          new_pending = '''        // Serialize acceleration-structure build ordering before entering pending writes.
+          // `Queue::submit` takes these locks in the same order, matching the declared rank graph.
+          let mut command_indices_lock = device.command_indices.write();
+          let mut pending_writes = self.pending_writes.lock();
+          let cmd_buf_raw = pending_writes.activate();
+          '''
+          if text.count(old_pending) != 1:
+              raise SystemExit(f'expected one pending-writes site, found {text.count(old_pending)}')
+          text = text.replace(old_pending, new_pending)
+
+          old_index = '''        let mut command_indices_lock = device.command_indices.write();
+          command_indices_lock.next_acceleration_structure_build_command_index += 1;
+          '''
+          new_index = '''        command_indices_lock.next_acceleration_structure_build_command_index += 1;
+          '''
+          if text.count(old_index) != 1:
+              raise SystemExit(f'expected one late command-index site, found {text.count(old_index)}')
+          text = text.replace(old_index, new_index)
+
+          path.write_text(text)
+
+      - name: Assert repaired acquisition shape
+        shell: python
+        run: |
+          from pathlib import Path
+          text = Path('wgpu-core/src/device/queue.rs').read_text()
+          start = text.index('    pub(crate) fn compact_blas_inner(')
+          end = text.index('\n}\n\nimpl Global {', start)
+          body = text[start:end]
+          command = body.index('let mut command_indices_lock = device.command_indices.write();')
+          pending = body.index('let mut pending_writes = self.pending_writes.lock();')
+          insert = body.index('pending_writes.insert_blas(&new_blas);')
+          assert command < pending < insert
+          assert body.count('device.command_indices.write()') == 1
+          assert body.count('self.pending_writes.lock()') == 1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting and exact diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustfmt --edition 2021 --check wgpu-core/src/device/queue.rs
+          git diff --check
+          git diff -- wgpu-core/src/device/queue.rs
+
+      - name: Compile wgpu-core with ranked lock validation
+        env:
+          RUSTFLAGS: --cfg wgpu_validate_locks
+        run: cargo check -p wgpu-core --all-features
+
+      - name: Run wgpu-core unit tests with ranked lock validation
+        env:
+          RUSTFLAGS: --cfg wgpu_validate_locks
+        run: cargo test -p wgpu-core --lib
+
+      - name: Verify carrier source was not published
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout -- wgpu-core/src/device/queue.rs
+          test "$(git hash-object wgpu-core/src/device/queue.rs)" = "e29290898c9b294723410e1e89fd03a6dbf1a42c"
+          test -z "$(git status --porcelain)"
