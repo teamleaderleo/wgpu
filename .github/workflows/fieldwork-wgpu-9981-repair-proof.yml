@@ -54,18 +54,20 @@ jobs:
               raise SystemExit(f'expected one pending-writes site, found {text.count(old_pending)}')
           text = text.replace(old_pending, new_pending)
 
-          old_index = '''        let mut command_indices_lock = device.command_indices.write();
+          old_late_index = '''        drop(snatch_guard);
+
+          let mut command_indices_lock = device.command_indices.write();
           command_indices_lock.next_acceleration_structure_build_command_index += 1;
           '''
-          new_index = '''        command_indices_lock.next_acceleration_structure_build_command_index += 1;
+          new_late_index = '''        command_indices_lock.next_acceleration_structure_build_command_index += 1;
           '''
-          if text.count(old_index) != 1:
-              raise SystemExit(f'expected one late command-index site, found {text.count(old_index)}')
-          text = text.replace(old_index, new_index)
+          if text.count(old_late_index) != 1:
+              raise SystemExit(f'expected one late command-index/drop site, found {text.count(old_late_index)}')
+          text = text.replace(old_late_index, new_late_index)
 
           path.write_text(text)
 
-      - name: Assert repaired acquisition shape
+      - name: Assert repaired acquisition and guard-lifetime shape
         shell: python
         run: |
           from pathlib import Path
@@ -73,12 +75,14 @@ jobs:
           start = text.index('    pub(crate) fn compact_blas_inner(')
           end = text.index('\n}\n\nimpl Global {', start)
           body = text[start:end]
+          snatch = body.index('let snatch_guard = device.snatchable_lock.read();')
           command = body.index('let mut command_indices_lock = device.command_indices.write();')
           pending = body.index('let mut pending_writes = self.pending_writes.lock();')
           insert = body.index('pending_writes.insert_blas(&new_blas);')
-          assert command < pending < insert
+          assert snatch < command < pending < insert
           assert body.count('device.command_indices.write()') == 1
           assert body.count('self.pending_writes.lock()') == 1
+          assert 'drop(snatch_guard);' not in body
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
