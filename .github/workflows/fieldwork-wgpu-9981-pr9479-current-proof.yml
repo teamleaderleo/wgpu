@@ -32,14 +32,18 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify immutable public inputs and exact lock-order delta
+      - name: Verify immutable public inputs, divergence, and lock-order delta
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git -C public-trunk rev-parse HEAD)" = "422b1c3a2c08feb39e63fdb7ca2798b26803d427"
-          test "$(git -C public-pr rev-parse HEAD)" = "7350b0c8d0acb2d410e3f5922fd4aba8407d5cbc"
-          git -C public-pr fetch --no-tags https://github.com/gfx-rs/wgpu.git 422b1c3a2c08feb39e63fdb7ca2798b26803d427
-          test "$(git -C public-pr merge-base HEAD 422b1c3a2c08feb39e63fdb7ca2798b26803d427)" = "422b1c3a2c08feb39e63fdb7ca2798b26803d427"
+          TRUNK=422b1c3a2c08feb39e63fdb7ca2798b26803d427
+          PR_HEAD=7350b0c8d0acb2d410e3f5922fd4aba8407d5cbc
+          MERGE_BASE=390f05b69acb1efc3855ab0b380838fe9f09260b
+          test "$(git -C public-trunk rev-parse HEAD)" = "$TRUNK"
+          test "$(git -C public-pr rev-parse HEAD)" = "$PR_HEAD"
+          git -C public-pr fetch --no-tags https://github.com/gfx-rs/wgpu.git "$TRUNK"
+          test "$(git -C public-pr merge-base HEAD "$TRUNK")" = "$MERGE_BASE"
+          test "$(git -C public-pr rev-list --left-right --count "$TRUNK"...HEAD)" = $'21\t10'
           python3 - <<'PY'
           from pathlib import Path
 
@@ -74,9 +78,6 @@ jobs:
         run: |
           import threading
 
-          # Controlled model of the exact source orders verified above.
-          # Unpatched submit: command_indices -> pending_writes.
-          # Unpatched compact: pending_writes -> command_indices.
           command = threading.Lock()
           pending = threading.Lock()
           submit_has_command = threading.Event()
@@ -104,7 +105,6 @@ jobs:
           second.join(0.2)
           assert first.is_alive() and second.is_alive(), 'opposite-order model did not deadlock as expected'
 
-          # Repaired compact follows command_indices -> pending_writes, matching submit.
           command2 = threading.Lock()
           pending2 = threading.Lock()
           submit_has_command2 = threading.Event()
@@ -139,12 +139,12 @@ jobs:
         with:
           components: rustfmt
 
-      - name: Check repaired queue formatting and diff cleanliness
+      - name: Check repaired queue formatting and PR-diff cleanliness
         shell: bash
         run: |
           set -euo pipefail
           rustfmt --edition 2021 --check public-pr/wgpu-core/src/device/queue.rs
-          git -C public-pr diff --check 422b1c3a2c08feb39e63fdb7ca2798b26803d427..HEAD
+          git -C public-pr diff --check 390f05b69acb1efc3855ab0b380838fe9f09260b..HEAD
 
       - name: Compile actual PR head with ranked lock validation
         working-directory: public-pr
