@@ -38,6 +38,7 @@ jobs:
           set -euo pipefail
           test "$(git -C public-trunk rev-parse HEAD)" = "422b1c3a2c08feb39e63fdb7ca2798b26803d427"
           test "$(git -C public-pr rev-parse HEAD)" = "7350b0c8d0acb2d410e3f5922fd4aba8407d5cbc"
+          git -C public-pr fetch --no-tags https://github.com/gfx-rs/wgpu.git 422b1c3a2c08feb39e63fdb7ca2798b26803d427
           test "$(git -C public-pr merge-base HEAD 422b1c3a2c08feb39e63fdb7ca2798b26803d427)" = "422b1c3a2c08feb39e63fdb7ca2798b26803d427"
           python3 - <<'PY'
           from pathlib import Path
