@@ -1,0 +1,167 @@
+name: Fieldwork WGPU 9981 current PR9479 proof
+
+on:
+  push:
+    branches:
+      - fieldwork/wgpu-9981-current-pr9479-proof
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ranked-lock-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out current public trunk read-only
+        uses: actions/checkout@v4
+        with:
+          repository: gfx-rs/wgpu
+          ref: 422b1c3a2c08feb39e63fdb7ca2798b26803d427
+          path: public-trunk
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out current public PR 9479 head read-only
+        uses: actions/checkout@v4
+        with:
+          repository: andyleiserson/wgpu
+          ref: 7350b0c8d0acb2d410e3f5922fd4aba8407d5cbc
+          path: public-pr
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify immutable public inputs and exact lock-order delta
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C public-trunk rev-parse HEAD)" = "422b1c3a2c08feb39e63fdb7ca2798b26803d427"
+          test "$(git -C public-pr rev-parse HEAD)" = "7350b0c8d0acb2d410e3f5922fd4aba8407d5cbc"
+          test "$(git -C public-pr merge-base HEAD 422b1c3a2c08feb39e63fdb7ca2798b26803d427)" = "422b1c3a2c08feb39e63fdb7ca2798b26803d427"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def compact_body(path: str) -> str:
+              text = Path(path).read_text()
+              start = text.index('    pub(crate) fn compact_blas_inner(')
+              end = text.index('\n}\n\nimpl Global {', start)
+              return text[start:end]
+
+          trunk = compact_body('public-trunk/wgpu-core/src/device/queue.rs')
+          repaired = compact_body('public-pr/wgpu-core/src/device/queue.rs')
+
+          pending = 'let mut pending_writes = self.pending_writes.lock();'
+          command = 'let mut command_indices_lock = device.command_indices.write();'
+          insert = 'pending_writes.insert_blas(&new_blas);'
+
+          assert trunk.index(pending) < trunk.index(command), 'current trunk no longer has reported inversion'
+          assert 'drop(snatch_guard);' in trunk, 'current trunk drop shape changed'
+
+          snatch_i = repaired.index('let snatch_guard = device.snatchable_lock.read();')
+          command_i = repaired.index(command)
+          pending_i = repaired.index(pending)
+          insert_i = repaired.index(insert)
+          assert snatch_i < command_i < pending_i < insert_i
+          assert repaired.count('device.command_indices.write()') == 1
+          assert repaired.count('self.pending_writes.lock()') == 1
+          assert 'drop(snatch_guard);' not in repaired
+          PY
+
+      - name: Run deterministic two-thread lock-order model
+        shell: python
+        run: |
+          import threading
+
+          # Controlled model of the exact source orders verified above.
+          # Unpatched submit: command_indices -> pending_writes.
+          # Unpatched compact: pending_writes -> command_indices.
+          command = threading.Lock()
+          pending = threading.Lock()
+          submit_has_command = threading.Event()
+          compact_has_pending = threading.Event()
+
+          def submit_unpatched():
+              with command:
+                  submit_has_command.set()
+                  assert compact_has_pending.wait(1)
+                  pending.acquire()
+
+          def compact_unpatched():
+              assert submit_has_command.wait(1)
+              with pending:
+                  compact_has_pending.set()
+                  command.acquire()
+
+          first = threading.Thread(target=submit_unpatched, daemon=True)
+          second = threading.Thread(target=compact_unpatched, daemon=True)
+          first.start()
+          second.start()
+          assert submit_has_command.wait(1)
+          assert compact_has_pending.wait(1)
+          first.join(0.2)
+          second.join(0.2)
+          assert first.is_alive() and second.is_alive(), 'opposite-order model did not deadlock as expected'
+
+          # Repaired compact follows command_indices -> pending_writes, matching submit.
+          command2 = threading.Lock()
+          pending2 = threading.Lock()
+          submit_has_command2 = threading.Event()
+          compact_started2 = threading.Event()
+          completed = []
+
+          def submit_repaired():
+              with command2:
+                  submit_has_command2.set()
+                  assert compact_started2.wait(1)
+                  with pending2:
+                      completed.append('submit')
+
+          def compact_repaired():
+              assert submit_has_command2.wait(1)
+              compact_started2.set()
+              with command2:
+                  with pending2:
+                      completed.append('compact')
+
+          third = threading.Thread(target=submit_repaired)
+          fourth = threading.Thread(target=compact_repaired)
+          third.start()
+          fourth.start()
+          third.join(2)
+          fourth.join(2)
+          assert not third.is_alive() and not fourth.is_alive(), 'rank-consistent model did not complete'
+          assert completed == ['submit', 'compact']
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check repaired queue formatting and diff cleanliness
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustfmt --edition 2021 --check public-pr/wgpu-core/src/device/queue.rs
+          git -C public-pr diff --check 422b1c3a2c08feb39e63fdb7ca2798b26803d427..HEAD
+
+      - name: Compile actual PR head with ranked lock validation
+        working-directory: public-pr
+        env:
+          RUSTFLAGS: --cfg wgpu_validate_locks
+        run: cargo check -p wgpu-core --all-features
+
+      - name: Run actual PR head wgpu-core unit tests with ranked lock validation
+        working-directory: public-pr
+        env:
+          RUSTFLAGS: --cfg wgpu_validate_locks
+        run: cargo test -p wgpu-core --lib
+
+      - name: Reverify read-only inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C public-trunk rev-parse HEAD)" = "422b1c3a2c08feb39e63fdb7ca2798b26803d427"
+          test "$(git -C public-pr rev-parse HEAD)" = "7350b0c8d0acb2d410e3f5922fd4aba8407d5cbc"
+          test -z "$(git -C public-trunk status --porcelain)"
+          test -z "$(git -C public-pr status --porcelain)"
